@@ -6,8 +6,8 @@
 // v2rayN read. The response also carries the usual panel headers so the
 // entry looks and behaves like any other subscription in the list.
 
-import { clientConfig } from './bot.js';
-import { allHosts } from './bot.js';
+import { allHosts, clientConfig } from './bot.js';
+import { findUser, parseUsers } from './users.js';
 
 // Ports Cloudflare terminates TLS on. Spreading across them gives real
 // variety rather than ten copies of the same thing.
@@ -17,18 +17,18 @@ const PORTS = [443, 8443, 2053, 2083, 2087, 2096];
 // which shaves a round trip off connection setup.
 const PATHS = ['/', '/assets/', '/static/?ed=2048', '/cdn/?ed=2048'];
 
-export function subVariants(env, hosts, count = 10) {
+export function subVariants(env, hosts, count = 10, user = null) {
   const out = [];
   for (let i = 0; out.length < count; i++) {
     const host = hosts[i % hosts.length];
     const port = PORTS[Math.floor(i / hosts.length) % PORTS.length];
     const path = PATHS[i % PATHS.length];
-    const cfg = clientConfig(env, host);
+    const cfg = clientConfig(env, host, user ? user.uuid : env.UUID);
     const ss = cfg.outbounds[0].streamSettings;
     cfg.outbounds[0].settings.vnext[0].port = port;
     ss.wsSettings.path = path;
     cfg.remarks =
-      (env.SUB_NAME || 'kemkite') +
+      (user ? user.name : env.SUB_NAME || 'kemkite') +
       ' | ' +
       host.split('.')[0] +
       '-' +
@@ -74,9 +74,16 @@ export function handleSubscription(request, env) {
   const want = (env.SUB_PATH || '').trim();
   if (!want || url.pathname !== '/' + want.replace(/^\/+/, '')) return null;
 
+  // ?u= selects who the subscription is for, by name or by uuid. An unknown
+  // value is refused rather than quietly falling back to somebody else.
+  const users = parseUsers(env);
+  const key = url.searchParams.get('u');
+  const user = findUser(users, key);
+  if (!user) return new Response('', { status: 404 });
+
   const hosts = allHosts(env, url.hostname);
   const count = Math.max(1, Math.min(30, Number(url.searchParams.get('n')) || 10));
-  const configs = subVariants(env, hosts, count);
+  const configs = subVariants(env, hosts, count, user);
   const info = userinfo(env);
 
   return new Response(JSON.stringify(configs, null, 2), {
@@ -84,7 +91,7 @@ export function handleSubscription(request, env) {
       'content-type': 'application/json; charset=utf-8',
       'subscription-userinfo': info.header,
       'profile-update-interval': env.SUB_INTERVAL || '12',
-      'profile-title': 'base64:' + b64(env.SUB_NAME || 'kemkite'),
+      'profile-title': 'base64:' + b64((env.SUB_NAME || 'kemkite') + ' - ' + user.name),
       'profile-web-page-url': 'https://' + url.hostname + '/',
       'cache-control': 'no-store',
     },

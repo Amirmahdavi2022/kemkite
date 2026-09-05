@@ -442,7 +442,11 @@ test('multi-host config balances across every worker', async () => {
 test('subscription hands back ten distinct working variants', async () => {
   const { subVariants } = await import('../src/subscription.js');
   const g = generate('mlkem768', 'random', 0);
-  const env = { UUID: 'u', DECRYPTION: g.decryption, SUB_NAME: 'kemkite' };
+  const env = {
+    UUID: '11111111-2222-3333-4444-555555555555',
+    DECRYPTION: g.decryption,
+    SUB_NAME: 'kemkite',
+  };
   const hosts = ['a.com', 'b.com', 'c.com', 'd.com'];
   const v = subVariants(env, hosts, 10);
   assert.equal(v.length, 10);
@@ -472,11 +476,73 @@ test('userinfo header carries traffic and a future expiry', async () => {
 test('the subscription path stays secret', async () => {
   const { handleSubscription } = await import('../src/subscription.js');
   const g = generate('mlkem768', 'random', 0);
-  const env = { UUID: 'u', DECRYPTION: g.decryption, SUB_PATH: 'sekret' };
+  const env = {
+    UUID: '11111111-2222-3333-4444-555555555555',
+    DECRYPTION: g.decryption,
+    SUB_PATH: 'sekret',
+  };
   assert.equal(handleSubscription(new Request('https://a.com/wrong'), env), null);
   assert.equal(handleSubscription(new Request('https://a.com/'), env), null);
   const ok = handleSubscription(new Request('https://a.com/sekret'), env);
   assert.equal(ok.status, 200);
   assert.ok(ok.headers.get('subscription-userinfo').includes('total='));
   assert.equal(ok.headers.get('profile-update-interval'), '12');
+});
+
+test('users parse from either UUID or USERS, and duplicates collapse', async () => {
+  const { parseUsers } = await import('../src/users.js');
+  const a = '11111111-2222-3333-4444-555555555555';
+  const b = '22222222-2222-3333-4444-555555555555';
+  const u = parseUsers({ UUID: a, USERS: 'ali:' + b + ',dup:' + a + ',bad:nope' });
+  assert.deepEqual(u.map((x) => x.name), ['main', 'ali']);
+  assert.equal(parseUsers({ UUID: a }).length, 1);
+  assert.equal(parseUsers({}).length, 0);
+});
+
+test('a nameless entry still gets a usable label', async () => {
+  const { parseUsers } = await import('../src/users.js');
+  const u = parseUsers({ USERS: '11111111-2222-3333-4444-555555555555' });
+  assert.equal(u.length, 1);
+  assert.ok(u[0].name.length > 0);
+});
+
+test('lookup works by name and by uuid, and refuses strangers', async () => {
+  const { parseUsers, findUser, findByUUID } = await import('../src/users.js');
+  const b = '22222222-2222-3333-4444-555555555555';
+  const u = parseUsers({ UUID: '11111111-2222-3333-4444-555555555555', USERS: 'ali:' + b });
+  assert.equal(findUser(u, 'ALI').uuid, b);
+  assert.equal(findUser(u, b.toUpperCase()).name, 'ali');
+  assert.equal(findUser(u, 'nobody'), null);
+  assert.equal(findUser(u, null).name, 'main');
+  assert.equal(findByUUID(u, u[1].bytes).name, 'ali');
+  assert.equal(findByUUID(u, parseUUID('99999999-2222-3333-4444-555555555555')), null);
+});
+
+test('subscription is scoped to the requested user', async () => {
+  const { handleSubscription } = await import('../src/subscription.js');
+  const g = generate('mlkem768', 'random', 0);
+  const b = '22222222-2222-3333-4444-555555555555';
+  const env = {
+    UUID: '11111111-2222-3333-4444-555555555555',
+    USERS: 'ali:' + b,
+    DECRYPTION: g.decryption,
+    SUB_PATH: 's3cret',
+    HOSTS: 'a.com,b.com',
+  };
+  const mine = await handleSubscription(new Request('https://a.com/s3cret'), env).json();
+  assert.equal(mine[0].outbounds[0].settings.vnext[0].users[0].id, env.UUID);
+  const his = await handleSubscription(new Request('https://a.com/s3cret?u=ali'), env).json();
+  assert.equal(his[0].outbounds[0].settings.vnext[0].users[0].id, b);
+  assert.ok(his[0].remarks.startsWith('ali'));
+  assert.equal(handleSubscription(new Request('https://a.com/s3cret?u=ghost'), env).status, 404);
+});
+
+test('a subscription with no user configured at all is refused', async () => {
+  const { handleSubscription } = await import('../src/subscription.js');
+  const g = generate('mlkem768', 'random', 0);
+  const r = handleSubscription(new Request('https://a.com/sekret'), {
+    DECRYPTION: g.decryption,
+    SUB_PATH: 'sekret',
+  });
+  assert.equal(r.status, 404);
 });

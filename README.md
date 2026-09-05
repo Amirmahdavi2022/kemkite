@@ -28,6 +28,7 @@ Supported:
 | Ciphers | AES-256-GCM and ChaCha20-Poly1305, picked by the client |
 | Transport | WebSocket |
 | Traffic | TCP, plus UDP/53 over DoH so VPN-mode DNS works |
+| Extras | multiple users, a subscription endpoint, an optional Telegram bot |
 
 ## Quick start
 
@@ -65,7 +66,7 @@ Deploy with `npx wrangler deploy`, then point a client at it:
 }
 ```
 
-Requires Xray-core 25.x or newer on the client. **Note the `encryption` value cannot travel in a `vless://` share link** — it's not one of the URL fields, so clients silently drop it and you get a connection that imports fine and then does nothing. Import full JSON.
+Requires Xray-core 25.x or newer on the client. **The `encryption` value cannot travel in a `vless://` share link** — it's not one of the URL fields, so clients silently drop it and you get a connection that imports fine and then does nothing. Import full JSON. In v2rayNG that means `+` then Custom Config, not the link import.
 
 ## Which mode should I pick
 
@@ -84,25 +85,46 @@ What it does **not** fix:
 - Your hostname still travels in cleartext SNI on every connection. If the domain gets listed, this changes nothing.
 - REALITY is impossible on Workers, because the TLS handshake isn't yours. The best you can look like is an ordinary Cloudflare customer.
 - Running a proxy on Workers is against Cloudflare's terms and accounts have been suspended for it.
-- Nothing here has been tested under a full national blackout.
+So it's a real improvement to one specific layer, and it isn't a magic bullet. Encryption and blocking are different problems, and this one only solves the first. Pick your domain strategy separately.
 
-So: this is a real improvement to one specific layer, and it isn't a magic bullet. Pick your domain strategy separately.
+## More than one person
+
+Set `USERS` to `name:uuid,name:uuid`. `UUID` on its own still works and becomes the user called `main`, so upgrading a single-user deployment changes nothing.
+
+```toml
+USERS = "ali:0f8d…,reza:6b21…"
+```
+
+Each person gets their own UUID and their own subscription link, which means you can hand one out, watch it turn up, and revoke it later without disturbing anyone else. Be clear about what that is and isn't: everyone shares the same server key, nothing is metered, and one user's traffic is not isolated from another's. It's revocable identity, not a billing system.
+
+## Subscription
+
+Set `SUB_PATH` to something unguessable and the Worker serves a subscription at `https://host/<SUB_PATH>?u=<name-or-uuid>`.
+
+It returns the JSON form, an array of complete configs, which is what Happ and v2rayN read. A base64 link list can't work here for the reason above. Ten entries by default, spread across every hostname you've deployed, the Cloudflare TLS ports (443, 8443, 2053, 2083, 2087, 2096) and a few paths, some with early data. They're ten genuinely different routes, not ten copies. `?n=` changes the count.
+
+The response carries `Subscription-Userinfo`, `Profile-Title` and `Profile-Update-Interval`, so the entry renders with a name, a traffic bar and an expiry date like any other subscription. **Those numbers are cosmetic.** Nothing is counted. They exist so the entry doesn't look out of place next to the others, and `SUB_TOTAL_GB` and `SUB_DAYS` control what they say.
 
 ## Optional Telegram bot
 
-Set `TG_TOKEN`, `TG_OWNER` and `TG_SECRET` and the same Worker will also serve a
-webhook that hands you the config from your phone. `/config` sends an importable
-JSON file, `/show` prints it inline, `/host` tells you which hostname answers.
+Set `TG_TOKEN`, `TG_OWNER` and `TG_SECRET` and the same Worker also serves a webhook, so you can pull configs onto a phone without sitting at a desk.
 
-Only your own Telegram id is answered, and a POST without Telegram's secret
-header gets the same 404 as any other stray request, so the endpoint doesn't
-look like anything from outside. Leave the three settings unset and none of this
-code runs.
+```
+/config [user]   one importable file per host
+/multi  [user]   every host in one config with automatic failover
+/sub    [user]   subscription links
+/users           who has a uuid here
+/hosts           every hostname in service
+```
+
+`/multi` is worth explaining: it writes an observatory that probes each host every five minutes and a `leastPing` balancer that picks between them. Deploy the same Worker to several accounts and a blocked domain or a suspended account stops being an outage, because the client moves on by itself.
+
+Only the owner id is answered. A POST without Telegram's secret header gets the same 404 as any other stray request, so the endpoint doesn't stand out. Leave the three settings unset and none of this code runs.
 
 ## Tests
 
 ```bash
-npm test     # 40 offline tests
+npm test     # 50 offline tests
 ```
 
 The interop testing that matters was done against the actual `xray` binary (v26.3.27) driving a SOCKS inbound through the tunnel, 400 KB checked byte-for-byte on every combination:
@@ -117,22 +139,28 @@ The interop testing that matters was done against the actual `xray` binary (v26.
 | mlkem768 | native | 0-RTT | pass |
 | x25519 | xorpub | 0-RTT | pass |
 
-Same thing again over WebSocket inside the real Workers runtime via `wrangler dev`.
+Same thing again over WebSocket inside the real Workers runtime via `wrangler dev`, and then on a deployed Worker behind a real hostname.
 
 One bug worth mentioning, since it's the kind of thing that only shows up in interop: `random` mode was completely dead at first because the AES-CTR helper rounded its keystream to 16-byte blocks. Record headers are 5 bytes, so everything after the first one desynced. Unit tests were perfectly happy. The real client was not.
+
+## A note on 0-RTT
+
+The server keeps resumption tickets in memory. On Workers that memory belongs to one isolate, and a later connection often lands on a different one, so most tickets won't be found and the client quietly falls back to a full handshake. It works, it just doesn't save you anything. Until there's a Durable Object behind it, generate keys with `0` seconds and stay on 1-RTT.
 
 ## Layout
 
 ```
-src/framing.js   record header, lengths, nonce
-src/aead.js      blake3 derive_key, AES-GCM / ChaCha20, AES-CTR
-src/stream.js    byte stream over any transport
-src/conn.js      record layer, chunking and rekey
-src/keys.js      key strings and generation
-src/server.js    the handshake
-src/vless.js     inner VLESS request
-src/bot.js       optional telegram webhook
-src/worker.js    the Worker
+src/framing.js       record header, lengths, nonce
+src/aead.js          blake3 derive_key, AES-GCM / ChaCha20, AES-CTR
+src/stream.js        byte stream over any transport
+src/conn.js          record layer, chunking and rekey
+src/keys.js          key strings and generation
+src/server.js        the handshake
+src/vless.js         inner VLESS request
+src/users.js         the uuid set
+src/subscription.js  subscription endpoint
+src/bot.js           optional telegram webhook
+src/worker.js        the Worker
 ```
 
 ## Credit

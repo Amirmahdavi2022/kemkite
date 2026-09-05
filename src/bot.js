@@ -4,6 +4,7 @@
 // not stand out from the outside.
 
 import { parseDecryption, publicFromPrivate, b64encode } from './keys.js';
+import { findUser, parseUsers } from './users.js';
 
 const TG = 'https://api.telegram.org/bot';
 
@@ -31,7 +32,7 @@ export function allHosts(env, fallback) {
   return list.length ? list : fallback ? [fallback] : [];
 }
 
-function outbound(env, host, tag) {
+function outbound(env, host, tag, uuid) {
   return {
     tag,
     protocol: 'vless',
@@ -41,7 +42,7 @@ function outbound(env, host, tag) {
           address: host,
           port: 443,
           users: [
-            { id: env.UUID, encryption: clientEncryption(env.DECRYPTION), level: 0 },
+            { id: uuid, encryption: clientEncryption(env.DECRYPTION), level: 0 },
           ],
         },
       ],
@@ -60,7 +61,7 @@ function outbound(env, host, tag) {
  * picking whichever is alive. If one account or zone gets blocked the client
  * moves on by itself instead of waiting for you to notice.
  */
-export function multiConfig(env, hosts) {
+export function multiConfig(env, hosts, uuid) {
   const tags = hosts.map((_, i) => 'w' + (i + 1));
   return {
     log: { loglevel: 'warning' },
@@ -75,7 +76,7 @@ export function multiConfig(env, hosts) {
       },
     ],
     outbounds: [
-      ...hosts.map((h, i) => outbound(env, h, tags[i])),
+      ...hosts.map((h, i) => outbound(env, h, tags[i], uuid || env.UUID)),
       { tag: 'direct', protocol: 'freedom' },
       { tag: 'block', protocol: 'blackhole' },
     ],
@@ -95,7 +96,7 @@ export function multiConfig(env, hosts) {
   };
 }
 
-export function clientConfig(env, host) {
+export function clientConfig(env, host, uuid) {
   return {
     log: { loglevel: 'warning' },
     inbounds: [
@@ -119,7 +120,7 @@ export function clientConfig(env, host) {
               port: 443,
               users: [
                 {
-                  id: env.UUID,
+                  id: uuid || env.UUID,
                   encryption: clientEncryption(env.DECRYPTION),
                   level: 0,
                 },
@@ -166,10 +167,13 @@ const HELP = [
   'kemkite is up.',
   '',
   '/config  one file per host, pick whichever you like',
+  '',
+  'Add a name to any of those to pick a user, e.g. /sub ali',
   '/multi   all hosts in one config, auto failover',
   '/sub     subscription links, ten variants each',
   '/show    primary config as text',
   '/hosts   list every hostname in service',
+  '/users   who has a uuid on this deployment',
   '/help    this message',
   '',
   'The encryption value cannot travel in a vless:// link, so import',
@@ -198,16 +202,24 @@ export async function handleUpdate(request, env) {
   const cmd = msg.text.trim().split(/\s+/)[0].split('@')[0].toLowerCase();
   const host = env.HOST || new URL(request.url).hostname;
   const hosts = allHosts(env, host);
+  const users = parseUsers(env);
+  const arg = msg.text.trim().split(/\s+/)[1];
+  const who = findUser(users, arg) || users[0];
 
   try {
-    if (cmd === '/config') {
+    if (cmd === '/users') {
+      await call(env, 'sendMessage', {
+        chat_id: chatId,
+        text: users.map((u, i) => (i + 1) + '. ' + u.name + '\n   ' + u.uuid).join('\n'),
+      });
+    } else if (cmd === '/config') {
       for (const h of hosts) {
         await sendDocument(
           env,
           chatId,
-          'kemkite-' + h.split('.')[0] + '.json',
-          JSON.stringify(clientConfig(env, h), null, 2),
-          h
+          'kemkite-' + who.name + '-' + h.split('.')[0] + '.json',
+          JSON.stringify(clientConfig(env, h, who.uuid), null, 2),
+          who.name + ' - ' + h
         );
       }
     } else if (cmd === '/multi') {
@@ -215,8 +227,8 @@ export async function handleUpdate(request, env) {
         env,
         chatId,
         'kemkite-multi.json',
-        JSON.stringify(multiConfig(env, hosts), null, 2),
-        hosts.length + ' hosts, lowest ping wins'
+        JSON.stringify(multiConfig(env, hosts, who.uuid), null, 2),
+        who.name + ' - ' + hosts.length + ' hosts, lowest ping wins'
       );
     } else if (cmd === '/sub') {
       if (!env.SUB_PATH) {
@@ -224,7 +236,12 @@ export async function handleUpdate(request, env) {
       } else {
         await call(env, 'sendMessage', {
           chat_id: chatId,
-          text: hosts.map((h) => 'https://' + h + '/' + env.SUB_PATH).join('\n\n'),
+          text:
+            who.name +
+            '\n\n' +
+            hosts
+              .map((h) => 'https://' + h + '/' + env.SUB_PATH + '?u=' + who.uuid)
+              .join('\n\n'),
           disable_web_page_preview: true,
         });
       }
@@ -234,7 +251,7 @@ export async function handleUpdate(request, env) {
         text: hosts.map((h, i) => (i + 1) + '. ' + h).join('\n'),
       });
     } else if (cmd === '/show') {
-      const json = JSON.stringify(clientConfig(env, host), null, 2);
+      const json = JSON.stringify(clientConfig(env, host, who.uuid), null, 2);
       await call(env, 'sendMessage', {
         chat_id: chatId,
         text: '```json\n' + json + '\n```',

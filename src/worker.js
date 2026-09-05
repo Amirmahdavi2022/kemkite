@@ -1,14 +1,8 @@
 import { connect } from 'cloudflare:sockets';
 import { ServerInstance } from './server.js';
 import { ByteStream } from './stream.js';
-import {
-  CMD_TCP,
-  CMD_UDP,
-  parseRequest,
-  parseUUID,
-  responseHeader,
-  uuidEquals,
-} from './vless.js';
+import { CMD_TCP, CMD_UDP, parseRequest, responseHeader } from './vless.js';
+import { findByUUID, parseUsers } from './users.js';
 import { concat } from './framing.js';
 import { botConfigured, handleUpdate } from './bot.js';
 import { handleSubscription } from './subscription.js';
@@ -29,7 +23,7 @@ export default {
       }
       return notAWorker(request, env);
     }
-    if (!env.DECRYPTION || !env.UUID) {
+    if (!env.DECRYPTION || (!env.UUID && !env.USERS)) {
       return new Response('not configured', { status: 500 });
     }
     if (instanceKey !== env.DECRYPTION) {
@@ -91,7 +85,7 @@ export default {
 
 async function serve(stream, env) {
   const conn = await instance.handshake(stream);
-  const uuid = parseUUID(env.UUID);
+  const users = parseUsers(env);
 
   let head = new Uint8Array(0);
   let req = null;
@@ -101,7 +95,7 @@ async function serve(stream, env) {
     head = concat(head, rec);
     req = parseRequest(head);
   }
-  if (!uuidEquals(req.uuid, uuid)) throw new Error('bad uuid');
+  if (!findByUUID(users, req.uuid)) throw new Error('bad uuid');
 
   const payload = head.subarray(req.offset);
   if (req.command === CMD_UDP) {

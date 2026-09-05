@@ -1,0 +1,77 @@
+name: cloudflare
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "locate = find which token owns the host, deploy = publish the worker"
+        type: choice
+        options: [locate, deploy]
+        default: locate
+      host:
+        description: "hostname to look for, e.g. a.m402.online"
+        type: string
+        required: false
+      token_slot:
+        description: "which CF_TOKEN_n to deploy with (deploy only)"
+        type: string
+        default: "1"
+      worker_name:
+        description: "worker script name (deploy only)"
+        type: string
+        default: kemkite
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: locate
+        if: inputs.mode == 'locate'
+        env:
+          TARGET_HOST: ${{ inputs.host }}
+          CF_TOKEN_1: ${{ secrets.CF_TOKEN_1 }}
+          CF_TOKEN_2: ${{ secrets.CF_TOKEN_2 }}
+          CF_TOKEN_3: ${{ secrets.CF_TOKEN_3 }}
+          CF_TOKEN_4: ${{ secrets.CF_TOKEN_4 }}
+        run: node scripts/cf-locate.mjs
+
+      - name: install
+        if: inputs.mode == 'deploy'
+        run: npm ci || npm install
+
+      - name: deploy
+        if: inputs.mode == 'deploy'
+        env:
+          SLOT: ${{ inputs.token_slot }}
+          NAME: ${{ inputs.worker_name }}
+          UUID: ${{ secrets.WORKER_UUID }}
+          DECRYPTION: ${{ secrets.WORKER_DECRYPTION }}
+          CF_TOKEN_1: ${{ secrets.CF_TOKEN_1 }}
+          CF_TOKEN_2: ${{ secrets.CF_TOKEN_2 }}
+          CF_TOKEN_3: ${{ secrets.CF_TOKEN_3 }}
+          CF_TOKEN_4: ${{ secrets.CF_TOKEN_4 }}
+        run: |
+          TOKEN_VAR="CF_TOKEN_${SLOT}"
+          export CLOUDFLARE_API_TOKEN="${!TOKEN_VAR}"
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "CF_TOKEN_${SLOT} is empty"; exit 1; fi
+          if [ -z "$UUID" ] || [ -z "$DECRYPTION" ]; then echo "WORKER_UUID / WORKER_DECRYPTION secrets missing"; exit 1; fi
+          npx wrangler deploy --name "$NAME" \
+            --var UUID:"$UUID" --var DECRYPTION:"$DECRYPTION" \
+            2>&1 | sed -e "s/${UUID}/<uuid>/g" -e "s/${DECRYPTION}/<decryption>/g"
+
+      - name: smoke test
+        if: inputs.mode == 'deploy'
+        run: |
+          URL="https://${{ inputs.worker_name }}.workers.dev/"
+          echo "plain GET should look unremarkable:"
+          curl -s -o /dev/null -w "  %{http_code}\n" --max-time 20 "$URL" || true
+          echo "websocket upgrade should be accepted:"
+          curl -s -o /dev/null -w "  %{http_code}\n" --max-time 20 \
+            -H "Connection: Upgrade" -H "Upgrade: websocket" \
+            -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==" \
+            "$URL" || true

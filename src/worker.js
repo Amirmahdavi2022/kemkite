@@ -11,6 +11,7 @@ import {
 } from './vless.js';
 import { concat } from './framing.js';
 import { botConfigured, handleUpdate } from './bot.js';
+import { handleSubscription } from './subscription.js';
 
 let instance = null;
 let instanceKey = null;
@@ -18,6 +19,10 @@ let instanceKey = null;
 export default {
   async fetch(request, env, ctx) {
     if (request.headers.get('Upgrade') !== 'websocket') {
+      if (request.method === 'GET' && env.SUB_PATH) {
+        const sub = handleSubscription(request, env);
+        if (sub) return sub;
+      }
       if (request.method === 'POST' && botConfigured(env)) {
         const handled = await handleUpdate(request, env);
         if (handled) return handled;

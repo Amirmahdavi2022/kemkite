@@ -438,3 +438,45 @@ test('multi-host config balances across every worker', async () => {
     assert.equal(o.streamSettings.tlsSettings.serverName, o.settings.vnext[0].address);
   }
 });
+
+test('subscription hands back ten distinct working variants', async () => {
+  const { subVariants } = await import('../src/subscription.js');
+  const g = generate('mlkem768', 'random', 0);
+  const env = { UUID: 'u', DECRYPTION: g.decryption, SUB_NAME: 'kemkite' };
+  const hosts = ['a.com', 'b.com', 'c.com', 'd.com'];
+  const v = subVariants(env, hosts, 10);
+  assert.equal(v.length, 10);
+  const seen = new Set();
+  for (const c of v) {
+    const o = c.outbounds[0];
+    const key = o.settings.vnext[0].address + ':' + o.settings.vnext[0].port + o.streamSettings.wsSettings.path;
+    assert.ok(!seen.has(key), 'duplicate variant ' + key);
+    seen.add(key);
+    assert.equal(o.settings.vnext[0].users[0].encryption, g.encryption);
+    assert.ok(c.remarks.length > 0);
+    assert.ok([443, 8443, 2053, 2083, 2087, 2096].includes(o.settings.vnext[0].port));
+  }
+});
+
+test('userinfo header carries traffic and a future expiry', async () => {
+  const { userinfo } = await import('../src/subscription.js');
+  const i = userinfo({ SUB_TOTAL_GB: '100', SUB_DAYS: '30' });
+  assert.match(i.header, /^upload=\d+; download=\d+; total=\d+; expire=\d+$/);
+  assert.ok(i.expire > Math.floor(Date.now() / 1000));
+  const total = Number(i.header.match(/total=(\d+)/)[1]);
+  const down = Number(i.header.match(/download=(\d+)/)[1]);
+  assert.equal(total, 100 * 1024 ** 3);
+  assert.ok(down < total);
+});
+
+test('the subscription path stays secret', async () => {
+  const { handleSubscription } = await import('../src/subscription.js');
+  const g = generate('mlkem768', 'random', 0);
+  const env = { UUID: 'u', DECRYPTION: g.decryption, SUB_PATH: 'sekret' };
+  assert.equal(handleSubscription(new Request('https://a.com/wrong'), env), null);
+  assert.equal(handleSubscription(new Request('https://a.com/'), env), null);
+  const ok = handleSubscription(new Request('https://a.com/sekret'), env);
+  assert.equal(ok.status, 200);
+  assert.ok(ok.headers.get('subscription-userinfo').includes('total='));
+  assert.equal(ok.headers.get('profile-update-interval'), '12');
+});

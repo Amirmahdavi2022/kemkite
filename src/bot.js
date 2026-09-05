@@ -167,6 +167,7 @@ const HELP = [
   '',
   '/config  one file per host, pick whichever you like',
   '/multi   all hosts in one config, auto failover',
+  '/sub     subscription links, ten variants each',
   '/show    primary config as text',
   '/hosts   list every hostname in service',
   '/help    this message',
@@ -217,6 +218,16 @@ export async function handleUpdate(request, env) {
         JSON.stringify(multiConfig(env, hosts), null, 2),
         hosts.length + ' hosts, lowest ping wins'
       );
+    } else if (cmd === '/sub') {
+      if (!env.SUB_PATH) {
+        await call(env, 'sendMessage', { chat_id: chatId, text: 'no subscription path is set' });
+      } else {
+        await call(env, 'sendMessage', {
+          chat_id: chatId,
+          text: hosts.map((h) => 'https://' + h + '/' + env.SUB_PATH).join('\n\n'),
+          disable_web_page_preview: true,
+        });
+      }
     } else if (cmd === '/hosts') {
       await call(env, 'sendMessage', {
         chat_id: chatId,

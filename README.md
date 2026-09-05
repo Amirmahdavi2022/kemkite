@@ -1,6 +1,6 @@
 # kemkite
 
-A VLESS server for Cloudflare Workers that speaks **VLESS Encryption** — the post-quantum layer Xray added in 2025 (`mlkem768x25519plus`).
+A VLESS server for Cloudflare Workers that speaks **VLESS Encryption**, the post-quantum layer Xray added in 2025 (`mlkem768x25519plus`).
 
 Every other VLESS-on-Workers project I could find still runs `encryption=none`. That's fine when your TLS ends at your own box, but on Workers it doesn't: TLS terminates at Cloudflare's edge, so the VLESS header, your UUID and every destination you visit are plaintext to the CDN sitting in the middle. kemkite closes that gap. The tunnel is encrypted between your client and the Worker itself, and Cloudflare only sees bytes it can't read.
 
@@ -66,13 +66,13 @@ Deploy with `npx wrangler deploy`, then point a client at it:
 }
 ```
 
-Requires Xray-core 25.x or newer on the client. **The `encryption` value cannot travel in a `vless://` share link** — it's not one of the URL fields, so clients silently drop it and you get a connection that imports fine and then does nothing. Import full JSON. In v2rayNG that means `+` then Custom Config, not the link import.
+Requires Xray-core 25.x or newer on the client. **The `encryption` value cannot travel in a `vless://` share link.** It isn't one of the URL fields, so clients silently drop it and you get a connection that imports fine and then does nothing. Import full JSON. In v2rayNG that means `+` then Custom Config, not the link import.
 
 ## Which mode should I pick
 
-- `native` — records look like TLS 1.3 application data (`17 03 03 …`). Reasonable if you're already behind real TLS.
-- `xorpub` — same, but the public keys in the handshake are masked so they don't stand out as key material.
-- `random` — the record headers are masked too, so the stream is uniformly random from the first byte. This is the one to use if you care about a DPI box that fingerprints nested TLS.
+- `native` sends records that look like TLS 1.3 application data (`17 03 03 …`). Reasonable if you're already behind real TLS.
+- `xorpub` does the same, but masks the public keys in the handshake so they don't stand out as key material.
+- `random` masks the record headers too, so the stream is uniformly random from the first byte. Use this one if you care about a DPI box that fingerprints nested TLS.
 
 `random` costs nothing measurable. It's the default in `npm run keys`.
 

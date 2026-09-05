@@ -416,3 +416,25 @@ test('a webhook post without the secret header is not handled', async () => {
   const req = new Request('https://example.com/', { method: 'POST', body: '{}' });
   assert.equal(await handleUpdate(req, { TG_SECRET: 'right' }), null);
 });
+
+test('host list keeps the primary first and drops blanks', async () => {
+  const { allHosts } = await import('../src/bot.js');
+  assert.deepEqual(allHosts({ HOSTS: 'b.com, c.com ,' }, 'a.com'), ['a.com', 'b.com', 'c.com']);
+  assert.deepEqual(allHosts({}, 'a.com'), ['a.com']);
+  assert.deepEqual(allHosts({ HOSTS: 'a.com,b.com' }, 'a.com'), ['a.com', 'b.com']);
+});
+
+test('multi-host config balances across every worker', async () => {
+  const { multiConfig } = await import('../src/bot.js');
+  const g = generate('mlkem768', 'random', 0);
+  const hosts = ['a.com', 'b.com', 'c.com', 'd.com'];
+  const c = multiConfig({ UUID: 'u', DECRYPTION: g.decryption }, hosts);
+  const proxies = c.outbounds.filter((o) => o.tag.startsWith('w'));
+  assert.equal(proxies.length, 4);
+  assert.deepEqual(proxies.map((o) => o.settings.vnext[0].address), hosts);
+  assert.equal(c.routing.rules[0].balancerTag, 'balance');
+  for (const o of proxies) {
+    assert.equal(o.settings.vnext[0].users[0].encryption, g.encryption);
+    assert.equal(o.streamSettings.tlsSettings.serverName, o.settings.vnext[0].address);
+  }
+});

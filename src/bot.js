@@ -21,6 +21,80 @@ export function clientEncryption(decryption) {
   return `mlkem768x25519plus.${mode}.${rtt}.${padding}${pub}`;
 }
 
+/** Every hostname this deployment answers on, primary first. */
+export function allHosts(env, fallback) {
+  const list = (env.HOSTS || '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+  if (fallback && !list.includes(fallback.toLowerCase())) list.unshift(fallback);
+  return list.length ? list : fallback ? [fallback] : [];
+}
+
+function outbound(env, host, tag) {
+  return {
+    tag,
+    protocol: 'vless',
+    settings: {
+      vnext: [
+        {
+          address: host,
+          port: 443,
+          users: [
+            { id: env.UUID, encryption: clientEncryption(env.DECRYPTION), level: 0 },
+          ],
+        },
+      ],
+    },
+    streamSettings: {
+      network: 'ws',
+      security: 'tls',
+      tlsSettings: { serverName: host, allowInsecure: false, fingerprint: 'chrome' },
+      wsSettings: { path: '/', headers: { Host: host } },
+    },
+  };
+}
+
+/**
+ * All hosts in one config, with an observatory probing them and a balancer
+ * picking whichever is alive. If one account or zone gets blocked the client
+ * moves on by itself instead of waiting for you to notice.
+ */
+export function multiConfig(env, hosts) {
+  const tags = hosts.map((_, i) => 'w' + (i + 1));
+  return {
+    log: { loglevel: 'warning' },
+    inbounds: [
+      {
+        tag: 'socks',
+        port: 10808,
+        listen: '127.0.0.1',
+        protocol: 'socks',
+        settings: { udp: true },
+        sniffing: { enabled: true, destOverride: ['http', 'tls'] },
+      },
+    ],
+    outbounds: [
+      ...hosts.map((h, i) => outbound(env, h, tags[i])),
+      { tag: 'direct', protocol: 'freedom' },
+      { tag: 'block', protocol: 'blackhole' },
+    ],
+    observatory: {
+      subjectSelector: ['w'],
+      probeUrl: 'https://www.gstatic.com/generate_204',
+      probeInterval: '5m',
+      enableConcurrency: true,
+    },
+    routing: {
+      domainStrategy: 'AsIs',
+      balancers: [
+        { tag: 'balance', selector: ['w'], strategy: { type: 'leastPing' } },
+      ],
+      rules: [{ type: 'field', network: 'tcp,udp', balancerTag: 'balance' }],
+    },
+  };
+}
+
 export function clientConfig(env, host) {
   return {
     log: { loglevel: 'warning' },
@@ -91,13 +165,14 @@ async function sendDocument(env, chatId, filename, text, caption) {
 const HELP = [
   'kemkite is up.',
   '',
-  '/config  full JSON config, ready to import',
-  '/show    the same config as text',
-  '/host    which hostname this worker answers on',
+  '/config  one file per host, pick whichever you like',
+  '/multi   all hosts in one config, auto failover',
+  '/show    primary config as text',
+  '/hosts   list every hostname in service',
   '/help    this message',
   '',
-  'Note: the encryption value cannot travel in a vless:// link,',
-  'so import the JSON rather than a share link.',
+  'The encryption value cannot travel in a vless:// link, so import',
+  'the JSON. In v2rayNG use + then Custom Config, not the link import.',
 ].join('\n');
 
 export async function handleUpdate(request, env) {
@@ -121,17 +196,32 @@ export async function handleUpdate(request, env) {
   const chatId = msg.chat.id;
   const cmd = msg.text.trim().split(/\s+/)[0].split('@')[0].toLowerCase();
   const host = env.HOST || new URL(request.url).hostname;
+  const hosts = allHosts(env, host);
 
   try {
     if (cmd === '/config') {
-      const json = JSON.stringify(clientConfig(env, host), null, 2);
+      for (const h of hosts) {
+        await sendDocument(
+          env,
+          chatId,
+          'kemkite-' + h.split('.')[0] + '.json',
+          JSON.stringify(clientConfig(env, h), null, 2),
+          h
+        );
+      }
+    } else if (cmd === '/multi') {
       await sendDocument(
         env,
         chatId,
-        'kemkite.json',
-        json,
-        'Import this file. ' + host
+        'kemkite-multi.json',
+        JSON.stringify(multiConfig(env, hosts), null, 2),
+        hosts.length + ' hosts, lowest ping wins'
       );
+    } else if (cmd === '/hosts') {
+      await call(env, 'sendMessage', {
+        chat_id: chatId,
+        text: hosts.map((h, i) => (i + 1) + '. ' + h).join('\n'),
+      });
     } else if (cmd === '/show') {
       const json = JSON.stringify(clientConfig(env, host), null, 2);
       await call(env, 'sendMessage', {

@@ -1,0 +1,8 @@
+name = "kemkite"
+main = "src/worker.js"
+compatibility_date = "2026-05-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+UUID = "REPLACE-WITH-YOUR-UUID"
+DECRYPTION = "REPLACE-WITH-npm-run-keys-OUTPUT"

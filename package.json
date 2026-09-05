@@ -1,0 +1,26 @@
+{
+  "name": "kemkite",
+  "version": "0.1.0",
+  "description": "Post-quantum VLESS Encryption (ML-KEM-768 + X25519) server for Cloudflare Workers",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "node --test test/unit.test.mjs",
+    "keys": "node scripts/keys.mjs",
+    "dev": "wrangler dev"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@noble/ciphers": "^2.4.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@noble/post-quantum": "^0.7.1"
+  },
+  "type": "module",
+  "devDependencies": {
+    "wrangler": "^4.129.0"
+  }
+}

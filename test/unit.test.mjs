@@ -385,3 +385,34 @@ test('uuid comparison is length-safe', () => {
   assert.ok(!uuidEquals(a, a.slice(0, 15)));
   assert.throws(() => parseUUID('nope'));
 });
+
+test('client encryption value is derived from the server key', async () => {
+  const { clientEncryption, clientConfig } = await import('../src/bot.js');
+  const g = generate('mlkem768', 'random', 0);
+  assert.equal(clientEncryption(g.decryption), g.encryption);
+  const cfg = clientConfig(
+    { UUID: 'u', DECRYPTION: g.decryption },
+    'example.com'
+  );
+  const user = cfg.outbounds[0].settings.vnext[0].users[0];
+  assert.equal(user.encryption, g.encryption);
+  assert.equal(cfg.outbounds[0].streamSettings.tlsSettings.serverName, 'example.com');
+});
+
+test('a 0-rtt server key produces a 0rtt client value', async () => {
+  const { clientEncryption } = await import('../src/bot.js');
+  assert.ok(clientEncryption(generate('x25519', 'native', 600).decryption).includes('.0rtt.'));
+});
+
+test('the bot stays asleep unless all three settings are present', async () => {
+  const { botConfigured } = await import('../src/bot.js');
+  assert.equal(botConfigured({}), false);
+  assert.equal(botConfigured({ TG_TOKEN: 'a', TG_OWNER: 'b' }), false);
+  assert.equal(botConfigured({ TG_TOKEN: 'a', TG_OWNER: 'b', TG_SECRET: 'c' }), true);
+});
+
+test('a webhook post without the secret header is not handled', async () => {
+  const { handleUpdate } = await import('../src/bot.js');
+  const req = new Request('https://example.com/', { method: 'POST', body: '{}' });
+  assert.equal(await handleUpdate(req, { TG_SECRET: 'right' }), null);
+});

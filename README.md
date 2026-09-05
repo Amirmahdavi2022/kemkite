@@ -88,10 +88,21 @@ What it does **not** fix:
 
 So: this is a real improvement to one specific layer, and it isn't a magic bullet. Pick your domain strategy separately.
 
+## Optional Telegram bot
+
+Set `TG_TOKEN`, `TG_OWNER` and `TG_SECRET` and the same Worker will also serve a
+webhook that hands you the config from your phone. `/config` sends an importable
+JSON file, `/show` prints it inline, `/host` tells you which hostname answers.
+
+Only your own Telegram id is answered, and a POST without Telegram's secret
+header gets the same 404 as any other stray request, so the endpoint doesn't
+look like anything from outside. Leave the three settings unset and none of this
+code runs.
+
 ## Tests
 
 ```bash
-npm test     # 36 offline tests
+npm test     # 40 offline tests
 ```
 
 The interop testing that matters was done against the actual `xray` binary (v26.3.27) driving a SOCKS inbound through the tunnel, 400 KB checked byte-for-byte on every combination:
@@ -120,6 +131,7 @@ src/conn.js      record layer, chunking and rekey
 src/keys.js      key strings and generation
 src/server.js    the handshake
 src/vless.js     inner VLESS request
+src/bot.js       optional telegram webhook
 src/worker.js    the Worker
 ```
 

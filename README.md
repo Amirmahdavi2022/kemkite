@@ -76,7 +76,7 @@ You have to flip one switch yourself: **Network → gRPC** in the Cloudflare das
 
 Workers can't send real HTTP/2 trailers, so the stream just ends when the connection is done. Xray only notices that at the very end, after everything already went through, so in practice it doesn't matter.
 
-The service name comes from your key so it's stable per deployment. Set `GRPC_SERVICE` to pick your own, `GRPC_STRICT=1` to refuse any other name, or `GRPC=0` to leave grpc out of the subscription and the bot completely.
+The service name comes from your key so it's stable per deployment. Set `GRPC_SERVICE` to pick your own, `GRPC_STRICT=1` to refuse any other name, or `GRPC=0` to leave grpc out of the subscription and the bot completely. If only some of your domains have the switch on, put the others in `GRPC_SKIP` (comma separated) and they'll just get ws entries.
 
 Tested the same way as the rest: real xray client, an HTTP/2 front standing in for the edge, the actual Workers runtime behind it. 400 KB byte-exact in both `Tun` and `TunMulti`, three back-and-forth rounds of 150 KB on one tunnel, six downloads at once, and a wrong UUID gets nothing. Not tried on a phone yet.
 
@@ -140,7 +140,7 @@ Only the owner id is answered. A POST without Telegram's secret header gets the 
 ## Tests
 
 ```bash
-npm test     # 57 offline tests
+npm test     # 58 offline tests
 ```
 
 The interop testing that matters was done against the actual `xray` binary (v26.3.27) driving a SOCKS inbound through the tunnel, 400 KB checked byte-for-byte on every combination:

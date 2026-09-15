@@ -19,12 +19,11 @@ const PATHS = ['/', '/assets/', '/static/?ed=2048', '/cdn/?ed=2048'];
 
 export function subVariants(env, hosts, count = 10, user = null) {
   const out = [];
-  const withGrpc = grpcEnabled(env);
   for (let i = 0; out.length < count; i++) {
     const host = hosts[i % hosts.length];
     // Every third entry is gRPC. Cloudflare's gRPC path is only relied on
     // over 443, so those entries do not rotate ports.
-    const grpc = withGrpc && i % 3 === 2;
+    const grpc = i % 3 === 2 && grpcEnabled(env, host);
     const port = grpc ? 443 : PORTS[Math.floor(i / hosts.length) % PORTS.length];
     const cfg = clientConfig(env, host, user ? user.uuid : env.UUID, grpc ? 'grpc' : 'ws');
     const ob = cfg.outbounds[0];

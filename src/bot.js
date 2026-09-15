@@ -65,8 +65,19 @@ export function streamFor(env, host, transport = 'ws') {
   };
 }
 
-export function grpcEnabled(env) {
-  return env.GRPC !== '0';
+/**
+ * gRPC on/off, optionally per host. GRPC_SKIP lists zones whose gRPC switch
+ * is still off, so they only get ws entries instead of dead grpc ones.
+ */
+export function grpcEnabled(env, host) {
+  if (env.GRPC === '0') return false;
+  if (!host) return true;
+  const h = host.toLowerCase();
+  return !(env.GRPC_SKIP || '')
+    .split(',')
+    .map((z) => z.trim().toLowerCase())
+    .filter(Boolean)
+    .some((z) => h === z || h.endsWith('.' + z));
 }
 
 function outbound(env, host, tag, uuid, transport = 'ws') {
@@ -97,7 +108,7 @@ export function multiConfig(env, hosts, uuid) {
   const legs = [];
   for (const h of hosts) {
     legs.push([h, 'ws']);
-    if (grpcEnabled(env)) legs.push([h, 'grpc']);
+    if (grpcEnabled(env, h)) legs.push([h, 'grpc']);
   }
   return {
     log: { loglevel: 'warning' },
@@ -231,7 +242,7 @@ export async function handleUpdate(request, env) {
           JSON.stringify(clientConfig(env, h, who.uuid), null, 2),
           who.name + ' - ' + h + ' (ws)'
         );
-        if (grpcEnabled(env)) {
+        if (grpcEnabled(env, h)) {
           await sendDocument(
             env,
             chatId,

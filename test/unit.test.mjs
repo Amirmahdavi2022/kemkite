@@ -647,3 +647,20 @@ test('multi config carries a ws and a grpc leg per host', async () => {
   const nets = cfg.outbounds.filter((o) => o.protocol === 'vless').map((o) => o.streamSettings.network);
   assert.deepEqual(nets, ['ws', 'grpc', 'ws', 'grpc']);
 });
+
+test('GRPC_SKIP keeps grpc away from zones whose switch is off', async () => {
+  const { subVariants } = await import('../src/subscription.js');
+  const { multiConfig } = await import('../src/bot.js');
+  const g = generate('mlkem768', 'random', 0);
+  const env = { UUID: '11111111-2222-3333-4444-555555555555', DECRYPTION: g.decryption, GRPC_SKIP: 'off.com' };
+  const hosts = ['x.off.com', 'y.on.com'];
+  const v = subVariants(env, hosts, 20);
+  for (const c of v) {
+    const o = c.outbounds[0];
+    if (o.settings.vnext[0].address === 'x.off.com') assert.equal(o.streamSettings.network, 'ws');
+  }
+  assert.ok(v.some((c) => c.outbounds[0].streamSettings.network === 'grpc'));
+  const m = multiConfig(env, hosts);
+  const legs = m.outbounds.filter((o) => o.protocol === 'vless').map((o) => o.settings.vnext[0].address + ':' + o.streamSettings.network);
+  assert.deepEqual(legs, ['x.off.com:ws', 'y.on.com:ws', 'y.on.com:grpc']);
+});

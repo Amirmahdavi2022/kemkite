@@ -5,6 +5,7 @@
 
 import { parseDecryption, publicFromPrivate, b64encode } from './keys.js';
 import { findUser, parseUsers } from './users.js';
+import { serviceName } from './grpc.js';
 
 const TG = 'https://api.telegram.org/bot';
 
@@ -32,7 +33,43 @@ export function allHosts(env, fallback) {
   return list.length ? list : fallback ? [fallback] : [];
 }
 
-function outbound(env, host, tag, uuid) {
+/** Stable subscription hostnames if there are any, the proxy hosts if not. */
+function subLinkHosts(env, hosts) {
+  const stable = (env.SUB_HOSTS || '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+  return stable.length ? stable : hosts;
+}
+
+/** Transport block for one host. "grpc" needs the zone's gRPC switch on. */
+export function streamFor(env, host, transport = 'ws') {
+  if (transport === 'grpc') {
+    return {
+      network: 'grpc',
+      security: 'tls',
+      tlsSettings: {
+        serverName: host,
+        allowInsecure: false,
+        fingerprint: 'chrome',
+        alpn: ['h2'],
+      },
+      grpcSettings: { serviceName: serviceName(env), multiMode: false },
+    };
+  }
+  return {
+    network: 'ws',
+    security: 'tls',
+    tlsSettings: { serverName: host, allowInsecure: false, fingerprint: 'chrome' },
+    wsSettings: { path: '/', headers: { Host: host } },
+  };
+}
+
+export function grpcEnabled(env) {
+  return env.GRPC !== '0';
+}
+
+function outbound(env, host, tag, uuid, transport = 'ws') {
   return {
     tag,
     protocol: 'vless',
@@ -47,12 +84,7 @@ function outbound(env, host, tag, uuid) {
         },
       ],
     },
-    streamSettings: {
-      network: 'ws',
-      security: 'tls',
-      tlsSettings: { serverName: host, allowInsecure: false, fingerprint: 'chrome' },
-      wsSettings: { path: '/', headers: { Host: host } },
-    },
+    streamSettings: streamFor(env, host, transport),
   };
 }
 
@@ -62,7 +94,11 @@ function outbound(env, host, tag, uuid) {
  * moves on by itself instead of waiting for you to notice.
  */
 export function multiConfig(env, hosts, uuid) {
-  const tags = hosts.map((_, i) => 'w' + (i + 1));
+  const legs = [];
+  for (const h of hosts) {
+    legs.push([h, 'ws']);
+    if (grpcEnabled(env)) legs.push([h, 'grpc']);
+  }
   return {
     log: { loglevel: 'warning' },
     inbounds: [
@@ -76,7 +112,7 @@ export function multiConfig(env, hosts, uuid) {
       },
     ],
     outbounds: [
-      ...hosts.map((h, i) => outbound(env, h, tags[i], uuid || env.UUID)),
+      ...legs.map(([h, t], i) => outbound(env, h, 'w' + (i + 1), uuid || env.UUID, t)),
       { tag: 'direct', protocol: 'freedom' },
       { tag: 'block', protocol: 'blackhole' },
     ],
@@ -96,7 +132,8 @@ export function multiConfig(env, hosts, uuid) {
   };
 }
 
-export function clientConfig(env, host, uuid) {
+export function clientConfig(env, host, uuid, transport = 'ws') {
+  const out = outbound(env, host, 'proxy', uuid || env.UUID, transport);
   return {
     log: { loglevel: 'warning' },
     inbounds: [
@@ -109,34 +146,7 @@ export function clientConfig(env, host, uuid) {
         sniffing: { enabled: true, destOverride: ['http', 'tls'] },
       },
     ],
-    outbounds: [
-      {
-        tag: 'proxy',
-        protocol: 'vless',
-        settings: {
-          vnext: [
-            {
-              address: host,
-              port: 443,
-              users: [
-                {
-                  id: uuid || env.UUID,
-                  encryption: clientEncryption(env.DECRYPTION),
-                  level: 0,
-                },
-              ],
-            },
-          ],
-        },
-        streamSettings: {
-          network: 'ws',
-          security: 'tls',
-          tlsSettings: { serverName: host, allowInsecure: false },
-          wsSettings: { path: '/', headers: { Host: host } },
-        },
-      },
-      { tag: 'direct', protocol: 'freedom' },
-    ],
+    outbounds: [out, { tag: 'direct', protocol: 'freedom' }],
   };
 }
 
@@ -166,7 +176,7 @@ async function sendDocument(env, chatId, filename, text, caption) {
 const HELP = [
   'kemkite is up.',
   '',
-  '/config  one file per host, pick whichever you like',
+  '/config  one file per host (ws, and grpc when it is on)',
   '',
   'Add a name to any of those to pick a user, e.g. /sub ali',
   '/multi   all hosts in one config, auto failover',
@@ -219,8 +229,17 @@ export async function handleUpdate(request, env) {
           chatId,
           'kemkite-' + who.name + '-' + h.split('.')[0] + '.json',
           JSON.stringify(clientConfig(env, h, who.uuid), null, 2),
-          who.name + ' - ' + h
+          who.name + ' - ' + h + ' (ws)'
         );
+        if (grpcEnabled(env)) {
+          await sendDocument(
+            env,
+            chatId,
+            'kemkite-' + who.name + '-' + h.split('.')[0] + '-grpc.json',
+            JSON.stringify(clientConfig(env, h, who.uuid, 'grpc'), null, 2),
+            who.name + ' - ' + h + ' (grpc)'
+          );
+        }
       }
     } else if (cmd === '/multi') {
       await sendDocument(
@@ -239,9 +258,12 @@ export async function handleUpdate(request, env) {
           text:
             who.name +
             '\n\n' +
-            hosts
+            subLinkHosts(env, hosts)
               .map((h) => 'https://' + h + '/' + env.SUB_PATH + '?u=' + who.uuid)
-              .join('\n\n'),
+              .join('\n\n') +
+            (env.SUB_HOSTS
+              ? '\n\nAdd all of them. Each one is on a different account, and they stay the same when the proxy hostnames rotate.'
+              : ''),
           disable_web_page_preview: true,
         });
       }

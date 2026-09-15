@@ -26,7 +26,7 @@ Supported:
 | Appearance | `native`, `xorpub`, `random` |
 | Resume | 1-RTT, and 0-RTT tickets |
 | Ciphers | AES-256-GCM and ChaCha20-Poly1305, picked by the client |
-| Transport | WebSocket |
+| Transport | WebSocket and gRPC |
 | Traffic | TCP, plus UDP/53 over DoH so VPN-mode DNS works |
 | Extras | multiple users, a subscription endpoint, an optional Telegram bot |
 
@@ -68,6 +68,18 @@ Deploy with `npx wrangler deploy`, then point a client at it:
 
 Requires Xray-core 25.x or newer on the client. **The `encryption` value cannot travel in a `vless://` share link.** It isn't one of the URL fields, so clients silently drop it and you get a connection that imports fine and then does nothing. Import full JSON. In v2rayNG that means `+` then Custom Config, not the link import.
 
+## gRPC
+
+Same encryption, different shape on the wire. Each connection is one gRPC stream (`/<service>/Tun`, or `TunMulti` if the client has multi mode on), so there's no `Upgrade: websocket` header and to the CDN it just looks like an app talking gRPC over HTTP/2. Pretty much the best disguise you can get while still sitting on Workers.
+
+You have to flip one switch yourself: **Network → gRPC** in the Cloudflare dashboard, for every domain you use. It's off by default and API tokens can't change it. If it's off, the ws configs keep working and the grpc ones just connect and go nowhere, which is confusing, so check that first.
+
+Workers can't send real HTTP/2 trailers, so the stream just ends when the connection is done. Xray only notices that at the very end, after everything already went through, so in practice it doesn't matter.
+
+The service name comes from your key so it's stable per deployment. Set `GRPC_SERVICE` to pick your own, `GRPC_STRICT=1` to refuse any other name, or `GRPC=0` to leave grpc out of the subscription and the bot completely.
+
+Tested the same way as the rest: real xray client, an HTTP/2 front standing in for the edge, the actual Workers runtime behind it. 400 KB byte-exact in both `Tun` and `TunMulti`, three back-and-forth rounds of 150 KB on one tunnel, six downloads at once, and a wrong UUID gets nothing. Not tried on a phone yet.
+
 ## Which mode should I pick
 
 - `native` sends records that look like TLS 1.3 application data (`17 03 03 …`). Reasonable if you're already behind real TLS.
@@ -103,6 +115,10 @@ Set `SUB_PATH` to something unguessable and the Worker serves a subscription at 
 
 It returns the JSON form, an array of complete configs, which is what Happ and v2rayN read. A base64 link list can't work here for the reason above. Ten entries by default, spread across every hostname you've deployed, the Cloudflare TLS ports (443, 8443, 2053, 2083, 2087, 2096) and a few paths, some with early data. They're ten genuinely different routes, not ten copies. `?n=` changes the count.
 
+Every third entry is gRPC on 443 (unless `GRPC=0`).
+
+If you rotate hostnames, the saved link dies with the old hostname. `SUB_HOSTS` fixes that: list one hostname per account that only ever hands out the subscription. Those never carry tunnel traffic (ws and grpc get a 404 there), the subscription they return points at whatever the current proxy hosts are, and the bot's `/sub` gives out those links instead. So you can rotate as often as you like and people's apps just pick up the new hosts on the next refresh.
+
 The response carries `Subscription-Userinfo`, `Profile-Title` and `Profile-Update-Interval`, so the entry renders with a name, a traffic bar and an expiry date like any other subscription. **Those numbers are cosmetic.** Nothing is counted. They exist so the entry doesn't look out of place next to the others, and `SUB_TOTAL_GB` and `SUB_DAYS` control what they say.
 
 ## Optional Telegram bot
@@ -110,7 +126,7 @@ The response carries `Subscription-Userinfo`, `Profile-Title` and `Profile-Updat
 Set `TG_TOKEN`, `TG_OWNER` and `TG_SECRET` and the same Worker also serves a webhook, so you can pull configs onto a phone without sitting at a desk.
 
 ```
-/config [user]   one importable file per host
+/config [user]   one file per host, ws and grpc
 /multi  [user]   every host in one config with automatic failover
 /sub    [user]   subscription links
 /users           who has a uuid here
@@ -124,7 +140,7 @@ Only the owner id is answered. A POST without Telegram's secret header gets the 
 ## Tests
 
 ```bash
-npm test     # 50 offline tests
+npm test     # 57 offline tests
 ```
 
 The interop testing that matters was done against the actual `xray` binary (v26.3.27) driving a SOCKS inbound through the tunnel, 400 KB checked byte-for-byte on every combination:
@@ -158,6 +174,7 @@ src/keys.js          key strings and generation
 src/server.js        the handshake
 src/vless.js         inner VLESS request
 src/users.js         the uuid set
+src/grpc.js          grpc framing (Hunk / MultiHunk)
 src/subscription.js  subscription endpoint
 src/bot.js           optional telegram webhook
 src/worker.js        the Worker

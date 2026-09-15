@@ -5,13 +5,23 @@ import { CMD_TCP, CMD_UDP, parseRequest, responseHeader } from './vless.js';
 import { findByUUID, parseUsers } from './users.js';
 import { concat } from './framing.js';
 import { botConfigured, handleUpdate } from './bot.js';
-import { handleSubscription } from './subscription.js';
+import { handleSubscription, subHosts } from './subscription.js';
+import { GrpcDecoder, encodeHunk, isGrpc } from './grpc.js';
 
 let instance = null;
 let instanceKey = null;
 
 export default {
   async fetch(request, env, ctx) {
+    // Subscription-only hostnames never carry tunnel traffic.
+    const onSubHost = subHosts(env).includes(new URL(request.url).hostname.toLowerCase());
+    if (onSubHost && (isGrpc(request, env) || request.headers.get('Upgrade') === 'websocket')) {
+      return notAWorker(request, env);
+    }
+    if (isGrpc(request, env)) {
+      if (!ready(env)) return new Response('not configured', { status: 500 });
+      return serveGrpc(request, env, ctx);
+    }
     if (request.headers.get('Upgrade') !== 'websocket') {
       if (request.method === 'GET' && env.SUB_PATH) {
         const sub = handleSubscription(request, env);
@@ -23,13 +33,7 @@ export default {
       }
       return notAWorker(request, env);
     }
-    if (!env.DECRYPTION || (!env.UUID && !env.USERS)) {
-      return new Response('not configured', { status: 500 });
-    }
-    if (instanceKey !== env.DECRYPTION) {
-      instance = new ServerInstance(env.DECRYPTION);
-      instanceKey = env.DECRYPTION;
-    }
+    if (!ready(env)) return new Response('not configured', { status: 500 });
 
     const pair = new WebSocketPair();
     const [client, ws] = Object.values(pair);
@@ -82,6 +86,61 @@ export default {
     });
   },
 };
+
+function ready(env) {
+  if (!env.DECRYPTION || (!env.UUID && !env.USERS)) return false;
+  if (instanceKey !== env.DECRYPTION) {
+    instance = new ServerInstance(env.DECRYPTION);
+    instanceKey = env.DECRYPTION;
+  }
+  return true;
+}
+
+/**
+ * One gRPC stream = one VLESS connection. The request body is the uplink,
+ * the streamed response body is the downlink, and both stay open together.
+ */
+function serveGrpc(request, env, ctx) {
+  const { readable, writable } = new TransformStream();
+  const out = writable.getWriter();
+  let closed = false;
+
+  const stream = new ByteStream({
+    write: (u8) => (closed ? Promise.reject(new Error('closed')) : out.write(encodeHunk(u8))),
+    close: () => {
+      if (closed) return;
+      closed = true;
+      out.close().catch(() => {});
+    },
+  });
+
+  const decoder = new GrpcDecoder((d) => stream.push(d.slice()));
+  const pump = (async () => {
+    const reader = request.body.getReader();
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        decoder.push(value);
+      }
+      stream.end();
+    } catch (e) {
+      stream.fail(e);
+    }
+  })();
+
+  ctx.waitUntil(
+    Promise.all([
+      pump,
+      serve(stream, env).catch(() => {}).finally(() => stream.close()),
+    ])
+  );
+
+  return new Response(readable, {
+    status: 200,
+    headers: { 'content-type': 'application/grpc' },
+  });
+}
 
 async function serve(stream, env) {
   const conn = await instance.handshake(stream);

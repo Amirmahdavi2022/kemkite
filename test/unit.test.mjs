@@ -430,8 +430,10 @@ test('multi-host config balances across every worker', async () => {
   const hosts = ['a.com', 'b.com', 'c.com', 'd.com'];
   const c = multiConfig({ UUID: 'u', DECRYPTION: g.decryption }, hosts);
   const proxies = c.outbounds.filter((o) => o.tag.startsWith('w'));
-  assert.equal(proxies.length, 4);
-  assert.deepEqual(proxies.map((o) => o.settings.vnext[0].address), hosts);
+  assert.equal(proxies.length, 8);
+  assert.deepEqual([...new Set(proxies.map((o) => o.settings.vnext[0].address))], hosts);
+  const ws = multiConfig({ UUID: 'u', DECRYPTION: g.decryption, GRPC: '0' }, hosts);
+  assert.equal(ws.outbounds.filter((o) => o.tag.startsWith('w')).length, 4);
   assert.equal(c.routing.rules[0].balancerTag, 'balance');
   for (const o of proxies) {
     assert.equal(o.settings.vnext[0].users[0].encryption, g.encryption);
@@ -453,7 +455,10 @@ test('subscription hands back ten distinct working variants', async () => {
   const seen = new Set();
   for (const c of v) {
     const o = c.outbounds[0];
-    const key = o.settings.vnext[0].address + ':' + o.settings.vnext[0].port + o.streamSettings.wsSettings.path;
+    const ss = o.streamSettings;
+    const key =
+      o.settings.vnext[0].address + ':' + o.settings.vnext[0].port + ss.network +
+      (ss.wsSettings ? ss.wsSettings.path : ss.grpcSettings.serviceName);
     assert.ok(!seen.has(key), 'duplicate variant ' + key);
     seen.add(key);
     assert.equal(o.settings.vnext[0].users[0].encryption, g.encryption);
@@ -545,4 +550,100 @@ test('a subscription with no user configured at all is refused', async () => {
     SUB_PATH: 'sekret',
   });
   assert.equal(r.status, 404);
+});
+
+// ---- gRPC transport ----
+
+test('grpc hunk round-trips through the decoder at any split point', async () => {
+  const { encodeHunk, GrpcDecoder } = await import('../src/grpc.js');
+  const parts = [new Uint8Array(0), new Uint8Array([1, 2, 3]), new Uint8Array(300).fill(7), new Uint8Array(70000).fill(9)];
+  const wire = [];
+  for (const p of parts) if (p.length) wire.push(...encodeHunk(p));
+  const bytes = new Uint8Array(wire);
+  for (const step of [1, 2, 5, 7, 4096, bytes.length]) {
+    const got = [];
+    const d = new GrpcDecoder((x) => got.push(x.slice()));
+    for (let i = 0; i < bytes.length; i += step) d.push(bytes.slice(i, i + step));
+    assert.equal(got.length, 3);
+    assert.deepEqual(got[0], parts[1]);
+    assert.equal(got[1].length, 300);
+    assert.equal(got[2].length, 70000);
+  }
+});
+
+test('grpc encoding matches protobuf wire format exactly', async () => {
+  const { encodeHunk } = await import('../src/grpc.js');
+  // Hunk{data: "hi"} = 0a 02 68 69, framed with a 5-byte gRPC prefix
+  assert.deepEqual([...encodeHunk(new Uint8Array([0x68, 0x69]))], [0, 0, 0, 0, 4, 0x0a, 2, 0x68, 0x69]);
+  // 200 bytes -> two-byte varint c8 01
+  const big = encodeHunk(new Uint8Array(200));
+  assert.deepEqual([...big.subarray(0, 8)], [0, 0, 0, 0, 203, 0x0a, 0xc8, 0x01]);
+});
+
+test('MultiHunk with several data fields yields each one, unknown fields skipped', async () => {
+  const { parseHunk } = await import('../src/grpc.js');
+  const msg = new Uint8Array([0x10, 0x05, 0x0a, 1, 0xaa, 0x0a, 2, 0xbb, 0xcc, 0x1a, 1, 0xff]);
+  const got = [];
+  parseHunk(msg, (d) => got.push([...d]));
+  assert.deepEqual(got, [[0xaa], [0xbb, 0xcc]]);
+});
+
+test('grpc detection needs POST, grpc content-type and a Tun path', async () => {
+  const { isGrpc, serviceName } = await import('../src/grpc.js');
+  const env = { DECRYPTION: 'x' };
+  const mk = (path, ct = 'application/grpc', method = 'POST') =>
+    new Request('https://a.com' + path, { method, headers: { 'content-type': ct }, body: method === 'POST' ? '' : undefined });
+  assert.equal(isGrpc(mk('/svc/Tun'), env), true);
+  assert.equal(isGrpc(mk('/svc/TunMulti'), env), true);
+  assert.equal(isGrpc(mk('/svc/Tun', 'application/json'), env), false);
+  assert.equal(isGrpc(mk('/svc/Other'), env), false);
+  assert.equal(isGrpc(mk('/svc/Tun', 'application/grpc', 'GET'), env), false);
+  const strict = { ...env, GRPC_STRICT: '1' };
+  assert.equal(isGrpc(mk('/nope/Tun'), strict), false);
+  assert.equal(isGrpc(mk('/' + serviceName(env) + '/Tun'), strict), true);
+  assert.equal(serviceName(env), serviceName({ DECRYPTION: 'x' }), 'stable per deployment');
+});
+
+test('subscription mixes in grpc entries on 443 and can turn them off', async () => {
+  const { handleSubscription } = await import('../src/subscription.js');
+  const g = generate('mlkem768', 'random', 0);
+  const env = {
+    UUID: '11111111-2222-3333-4444-555555555555',
+    DECRYPTION: g.decryption,
+    SUB_PATH: 's',
+    HOSTS: 'a.com,b.com',
+  };
+  const list = await handleSubscription(new Request('https://a.com/s?u=main'), env).json();
+  const grpc = list.filter((c) => c.outbounds[0].streamSettings.network === 'grpc');
+  assert.ok(grpc.length >= 3);
+  for (const c of grpc) {
+    assert.equal(c.outbounds[0].settings.vnext[0].port, 443);
+    assert.deepEqual(c.outbounds[0].streamSettings.tlsSettings.alpn, ['h2']);
+    assert.ok(c.outbounds[0].settings.vnext[0].users[0].encryption.startsWith('mlkem768x25519plus.'));
+  }
+  const off = await handleSubscription(new Request('https://a.com/s?u=main'), { ...env, GRPC: '0' }).json();
+  assert.equal(off.filter((c) => c.outbounds[0].streamSettings.network === 'grpc').length, 0);
+});
+
+test('a stable subscription host is not mixed into the proxy hosts', async () => {
+  const { handleSubscription } = await import('../src/subscription.js');
+  const g = generate('mlkem768', 'random', 0);
+  const env = {
+    UUID: '11111111-2222-3333-4444-555555555555',
+    DECRYPTION: g.decryption,
+    SUB_PATH: 's',
+    HOSTS: 'x1.a.com,x2.b.com',
+    SUB_HOSTS: 'sub.a.com,sub.b.com',
+  };
+  const list = await handleSubscription(new Request('https://sub.b.com/s?u=main'), env).json();
+  const addrs = new Set(list.map((c) => c.outbounds[0].settings.vnext[0].address));
+  assert.deepEqual([...addrs].sort(), ['x1.a.com', 'x2.b.com']);
+});
+
+test('multi config carries a ws and a grpc leg per host', async () => {
+  const { multiConfig } = await import('../src/bot.js');
+  const g = generate('mlkem768', 'random', 0);
+  const cfg = multiConfig({ DECRYPTION: g.decryption, UUID: '11111111-2222-3333-4444-555555555555' }, ['a.com', 'b.com']);
+  const nets = cfg.outbounds.filter((o) => o.protocol === 'vless').map((o) => o.streamSettings.network);
+  assert.deepEqual(nets, ['ws', 'grpc', 'ws', 'grpc']);
 });

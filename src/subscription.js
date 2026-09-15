@@ -6,7 +6,7 @@
 // v2rayN read. The response also carries the usual panel headers so the
 // entry looks and behaves like any other subscription in the list.
 
-import { allHosts, clientConfig } from './bot.js';
+import { allHosts, clientConfig, grpcEnabled } from './bot.js';
 import { findUser, parseUsers } from './users.js';
 
 // Ports Cloudflare terminates TLS on. Spreading across them gives real
@@ -19,26 +19,41 @@ const PATHS = ['/', '/assets/', '/static/?ed=2048', '/cdn/?ed=2048'];
 
 export function subVariants(env, hosts, count = 10, user = null) {
   const out = [];
+  const withGrpc = grpcEnabled(env);
   for (let i = 0; out.length < count; i++) {
     const host = hosts[i % hosts.length];
-    const port = PORTS[Math.floor(i / hosts.length) % PORTS.length];
-    const path = PATHS[i % PATHS.length];
-    const cfg = clientConfig(env, host, user ? user.uuid : env.UUID);
-    const ss = cfg.outbounds[0].streamSettings;
-    cfg.outbounds[0].settings.vnext[0].port = port;
-    ss.wsSettings.path = path;
+    // Every third entry is gRPC. Cloudflare's gRPC path is only relied on
+    // over 443, so those entries do not rotate ports.
+    const grpc = withGrpc && i % 3 === 2;
+    const port = grpc ? 443 : PORTS[Math.floor(i / hosts.length) % PORTS.length];
+    const cfg = clientConfig(env, host, user ? user.uuid : env.UUID, grpc ? 'grpc' : 'ws');
+    const ob = cfg.outbounds[0];
+    ob.settings.vnext[0].port = port;
+    if (!grpc) ob.streamSettings.wsSettings.path = PATHS[i % PATHS.length];
     cfg.remarks =
       (user ? user.name : env.SUB_NAME || 'kemkite') +
       ' | ' +
       host.split('.')[0] +
       '-' +
-      port +
+      (grpc ? 'grpc' : port) +
       ' | ' +
       String(out.length + 1).padStart(2, '0');
     out.push(cfg);
     if (i > count * 8) break;
   }
   return out;
+}
+
+/**
+ * Hostnames that only exist to hand out the subscription. They never carry
+ * proxy traffic and are never rotated, so a saved subscription link keeps
+ * working after the proxy hostnames change underneath it.
+ */
+export function subHosts(env) {
+  return (env.SUB_HOSTS || '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 function b64(s) {
@@ -81,7 +96,9 @@ export function handleSubscription(request, env) {
   const user = findUser(users, key);
   if (!user) return new Response('', { status: 404 });
 
-  const hosts = allHosts(env, url.hostname);
+  const stable = subHosts(env).includes(url.hostname.toLowerCase());
+  const hosts = allHosts(env, stable ? null : url.hostname);
+  if (!hosts.length) return new Response('', { status: 404 });
   const count = Math.max(1, Math.min(30, Number(url.searchParams.get('n')) || 10));
   const configs = subVariants(env, hosts, count, user);
   const info = userinfo(env);

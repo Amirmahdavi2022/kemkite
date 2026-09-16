@@ -87,17 +87,25 @@ export function handleSubscription(request, env) {
   const url = new URL(request.url);
   const want = (env.SUB_PATH || '').trim();
   if (!want || url.pathname !== '/' + want.replace(/^\/+/, '')) return null;
+  const where = url.hostname + (env.HOST ? ' on ' + env.HOST : '');
 
   // ?u= selects who the subscription is for, by name or by uuid. An unknown
   // value is refused rather than quietly falling back to somebody else.
   const users = parseUsers(env);
   const key = url.searchParams.get('u');
   const user = findUser(users, key);
-  if (!user) return new Response('', { status: 404 });
+  if (!user) {
+    // Shows up in `wrangler tail`. Only a short prefix of the key is logged.
+    console.log('sub 404: no user for u=' + String(key).slice(0, 4) + '… (' + users.length + ' users known) at ' + where);
+    return new Response('', { status: 404 });
+  }
 
   const stable = subHosts(env).includes(url.hostname.toLowerCase());
   const hosts = allHosts(env, stable ? null : url.hostname);
-  if (!hosts.length) return new Response('', { status: 404 });
+  if (!hosts.length) {
+    console.log('sub 404: no hosts configured at ' + where);
+    return new Response('', { status: 404 });
+  }
   const count = Math.max(1, Math.min(30, Number(url.searchParams.get('n')) || 10));
   const configs = subVariants(env, hosts, count, user);
   const info = userinfo(env);

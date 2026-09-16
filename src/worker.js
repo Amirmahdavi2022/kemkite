@@ -26,6 +26,7 @@ export default {
       if (request.method === 'GET' && env.SUB_PATH) {
         const sub = handleSubscription(request, env);
         if (sub) return sub;
+        console.log('404: path is not the sub path (' + new URL(request.url).pathname.length + ' chars) at ' + new URL(request.url).hostname);
       }
       if (request.method === 'POST' && botConfigured(env)) {
         const handled = await handleUpdate(request, env);

@@ -266,16 +266,24 @@ function ghConfigured(env) {
 }
 
 /**
- * Appends name:uuid to the USERS secret and triggers the fleet deploy.
+ * The USERS line with one person added or taken out. "main" (env.UUID) is
+ * never part of it. An empty result is written as "-": GitHub treats an
+ * empty secret as unset and the deploy would fall back to the old list, so
+ * the removal would silently not happen. parseUsers skips "-" as malformed.
+ */
+export function usersLine(users, { add, remove } = {}) {
+  let list = users.filter((u) => u.name !== 'main');
+  if (remove) list = list.filter((u) => u.uuid.toLowerCase() !== remove.uuid.toLowerCase());
+  const parts = list.map((u) => u.name + ':' + u.uuid);
+  if (add) parts.push(add.name + ':' + add.uuid);
+  return parts.length ? parts.join(',') : '-';
+}
+
+/**
+ * Writes the USERS secret and triggers the fleet deploy.
  * Returns true if the workflow dispatch was accepted.
  */
-async function addUser(env, name, uuid) {
-  // Current names come from what this worker already knows; each carries its
-  // own uuid, so rebuild the full USERS string from the live set plus the new
-  // one. env.UUID stays the "main" user and is not part of USERS.
-  const existing = parseUsers(env).filter((u) => u.name !== 'main');
-  const line = existing.map((u) => u.name + ':' + u.uuid).concat(name + ':' + uuid).join(',');
-
+async function writeUsers(env, line) {
   // Encrypt USERS against the repo public key (libsodium sealed box).
   const keyRes = await gh(env, 'GET', '/repos/' + env.GH_REPO + '/actions/secrets/public-key');
   if (!keyRes.ok) return false;
@@ -320,6 +328,7 @@ const HELP = [
   'kemkite is up.',
   '',
   '/adduser <name>  make a new user and redeploy, then hand back their links',
+  '/deluser <name>  cut a user off everywhere (name or uuid), then redeploy',
   '/config  one file per host (ws, and grpc when it is on)',
   '',
   'Add a name to any of those to pick a user, e.g. /sub ali',
@@ -386,7 +395,7 @@ export async function handleUpdate(request, env) {
       }
       const uuid = crypto.randomUUID();
       await call(env, 'sendMessage', { chat_id: chatId, text: 'adding ' + clean + ' and redeploying, this takes a minute...' });
-      const ok = await addUser(env, clean, uuid);
+      const ok = await writeUsers(env, usersLine(users, { add: { name: clean, uuid } }));
       if (ok) {
         const subs = subLinkHosts(env, hosts)
           .map((h) => 'https://' + h + '/' + env.SUB_PATH + '?u=' + uuid)
@@ -399,6 +408,33 @@ export async function handleUpdate(request, env) {
         });
       } else {
         await call(env, 'sendMessage', { chat_id: chatId, text: "couldn't kick off the deploy, check the worker's GH settings" });
+      }
+    } else if (cmd === '/deluser' || cmd === '/removeuser' || cmd === '/revoke') {
+      if (!ghConfigured(env)) {
+        await call(env, 'sendMessage', { chat_id: chatId, text: 'removing users needs GH_TOKEN, GH_REPO and GH_WORKFLOW set on the worker.' });
+        return new Response('ok');
+      }
+      // No default here on purpose: a bare /deluser must never pick someone.
+      const target = arg ? findUser(users, arg) : null;
+      if (!arg) {
+        await call(env, 'sendMessage', {
+          chat_id: chatId,
+          text: 'send: /deluser <name>   e.g. /deluser ali\n\n' +
+            users.filter((u) => u.name !== 'main').map((u) => '/deluser ' + u.name).join('\n'),
+        });
+      } else if (!target) {
+        await call(env, 'sendMessage', { chat_id: chatId, text: 'no user called ' + arg + ', see /users' });
+      } else if (target.name === 'main') {
+        await call(env, 'sendMessage', { chat_id: chatId, text: "main is the deployment's own uuid and can't be removed from here" });
+      } else {
+        await call(env, 'sendMessage', { chat_id: chatId, text: 'removing ' + target.name + ' and redeploying, this takes a minute...' });
+        const ok = await writeUsers(env, usersLine(users, { remove: target }));
+        await call(env, 'sendMessage', {
+          chat_id: chatId,
+          text: ok
+            ? target.name + ' is being removed. In about a minute their uuid stops working on every host and their subscription links return nothing.\n\nCheck with /users once it is done.'
+            : "couldn't kick off the deploy, check the worker's GH settings",
+        });
       }
     } else if (cmd === '/users') {
       await call(env, 'sendMessage', {

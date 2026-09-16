@@ -130,17 +130,21 @@ Set `TG_TOKEN`, `TG_OWNER` and `TG_SECRET` and the same Worker also serves a web
 /multi  [user]   every host in one config with automatic failover
 /sub    [user]   subscription links
 /users           who has a uuid here
+/adduser <name>  new uuid, redeploys, sends back their links
+/deluser <name>  cuts that person off on every host, redeploys
 /hosts           every hostname in service
 ```
 
 `/multi` is worth explaining: it writes an observatory that probes each host every five minutes and a `leastPing` balancer that picks between them. Deploy the same Worker to several accounts and a blocked domain or a suspended account stops being an outage, because the client moves on by itself.
+
+`/adduser` and `/deluser` need `GH_TOKEN`, `GH_REPO` and `GH_WORKFLOW` on the worker. The bot can't talk to Cloudflare itself so it rewrites the users secret in your ops repo and kicks off the deploy there. Takes about a minute, and after a `/deluser` that uuid is refused everywhere and its subscription link just 404s. `main` can't be removed this way since it's the deployment's own uuid.
 
 Only the owner id is answered. A POST without Telegram's secret header gets the same 404 as any other stray request, so the endpoint doesn't stand out. Leave the three settings unset and none of this code runs.
 
 ## Tests
 
 ```bash
-npm test     # 58 offline tests
+npm test     # 61 offline tests
 ```
 
 The interop testing that matters was done against the actual `xray` binary (v26.3.27) driving a SOCKS inbound through the tunnel, 400 KB checked byte-for-byte on every combination:

@@ -673,3 +673,81 @@ test('crypto_box beforenm subkey matches the libsodium vector', async () => {
     '28ca92de0640a0cfd0805dd3ca88a5e40a8df201b052caf2ac829893b474eb07'
   );
 });
+
+test('usersLine adds, removes, and never writes an empty list', async () => {
+  const { usersLine } = await import('../src/bot.js');
+  const { parseUsers } = await import('../src/users.js');
+  const A = '11111111-1111-4111-8111-111111111111';
+  const B = '22222222-2222-4222-8222-222222222222';
+  const M = '33333333-3333-4333-8333-333333333333';
+  const users = parseUsers({ UUID: M, USERS: 'ali:' + A + ',reza:' + B });
+  assert.equal(usersLine(users, { remove: users[1] }), 'reza:' + B);
+  assert.equal(usersLine(users, { remove: { uuid: B.toUpperCase() } }), 'ali:' + A);
+  assert.equal(usersLine(users, { add: { name: 'sara', uuid: M.replace(/3/g, '4') } }),
+    'ali:' + A + ',reza:' + B + ',sara:' + M.replace(/3/g, '4'));
+  const one = parseUsers({ UUID: M, USERS: 'ali:' + A });
+  const empty = usersLine(one, { remove: one[1] });
+  assert.equal(empty, '-');
+  // what the next deploy does with it: only main is left
+  const after = parseUsers({ UUID: M, USERS: empty });
+  assert.deepEqual(after.map((u) => u.name), ['main']);
+});
+
+test('/deluser writes the smaller list and redeploys; refuses main, blanks and strangers', async () => {
+  const { handleUpdate, __boxKeyHex } = await import('../src/bot.js');
+  const { xsalsa20poly1305 } = await import('@noble/ciphers/salsa.js');
+  const { blake2b } = await import('@noble/hashes/blake2.js');
+  const A = '11111111-1111-4111-8111-111111111111';
+  const B = '22222222-2222-4222-8222-222222222222';
+  const M = '33333333-3333-4333-8333-333333333333';
+  const recipSec = x25519.utils.randomSecretKey();
+  const recipPub = x25519.getPublicKey(recipSec);
+  const env = {
+    UUID: M, USERS: 'ali:' + A + ',reza:' + B,
+    TG_TOKEN: 't', TG_OWNER: '42', TG_SECRET: 's',
+    GH_TOKEN: 'g', GH_REPO: 'o/r', GH_WORKFLOW: 'ops.yml', HOST: 'x.example',
+  };
+  const realFetch = globalThis.fetch;
+  let calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), method: init.method || 'GET', body: init.body });
+    if (String(url).endsWith('/secrets/public-key')) {
+      return new Response(JSON.stringify({ key: Buffer.from(recipPub).toString('base64'), key_id: 'k1' }));
+    }
+    return new Response('{}', { status: String(url).includes('/dispatches') ? 204 : 200 });
+  };
+  const send = (text) => handleUpdate(new Request('https://x.example/', {
+    method: 'POST',
+    headers: { 'x-telegram-bot-api-secret-token': 's' },
+    body: JSON.stringify({ message: { text, from: { id: 42 }, chat: { id: 42 } } }),
+  }), env);
+  const puts = () => calls.filter((c) => c.method === 'PUT');
+  try {
+    for (const t of ['/deluser', '/deluser main', '/deluser nobody']) {
+      calls = [];
+      await send(t);
+      assert.equal(puts().length, 0, t + ' must not touch the secret');
+      assert.equal(calls.filter((c) => c.url.includes('/dispatches')).length, 0);
+    }
+    calls = [];
+    await send('/deluser ALI');
+    assert.equal(puts().length, 1);
+    const put = JSON.parse(puts()[0].body);
+    assert.equal(put.key_id, 'k1');
+    const sealed = Buffer.from(put.encrypted_value, 'base64');
+    const ephPub = sealed.subarray(0, 32);
+    const shared = x25519.getSharedSecret(recipSec, ephPub);
+    const key = Buffer.from(__boxKeyHex(Buffer.from(shared).toString('hex')), 'hex');
+    const nonce = blake2b(new Uint8Array([...ephPub, ...recipPub]), { dkLen: 24 });
+    const plain = new TextDecoder().decode(xsalsa20poly1305(key, nonce).decrypt(sealed.subarray(32)));
+    assert.equal(plain, 'reza:' + B);
+    const disp = calls.find((c) => c.url.includes('/dispatches'));
+    assert.deepEqual(JSON.parse(disp.body), { ref: 'main', inputs: { mode: 'fleet' } });
+    // by uuid works too
+    calls = [];
+    await send('/deluser ' + B);
+    assert.equal(puts().length, 1);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

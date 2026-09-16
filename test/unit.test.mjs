@@ -664,3 +664,12 @@ test('GRPC_SKIP keeps grpc away from zones whose switch is off', async () => {
   const legs = m.outbounds.filter((o) => o.protocol === 'vless').map((o) => o.settings.vnext[0].address + ':' + o.streamSettings.network);
   assert.deepEqual(legs, ['x.off.com:ws', 'y.on.com:ws', 'y.on.com:grpc']);
 });
+
+test('crypto_box beforenm subkey matches the libsodium vector', async () => {
+  const { __boxKeyHex } = await import('../src/bot.js');
+  // shared = X25519(ephSec=0x07*32, pub) ; expected = PyNaCl crypto_box_beforenm
+  assert.equal(
+    __boxKeyHex('7711659444956d8370a402062d5b807d1199c1c0b8b8df28e58c1547702f093a'),
+    '28ca92de0640a0cfd0805dd3ca88a5e40a8df201b052caf2ac829893b474eb07'
+  );
+});

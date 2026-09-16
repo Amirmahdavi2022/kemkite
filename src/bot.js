@@ -161,6 +161,138 @@ export function clientConfig(env, host, uuid, transport = 'ws') {
   };
 }
 
+// --- adding users -----------------------------------------------------------
+//
+// A new user means a new line in USERS on every worker, which only takes
+// effect after a redeploy. The bot can't reach Cloudflare, but it can ask
+// GitHub to run the fleet deploy: it reads the current USERS secret's names,
+// appends name:uuid, writes the secret back, and dispatches the workflow.
+// The deploy step already reads the rest of the config from the live worker,
+// so USERS is the only thing that has to change.
+
+async function gh(env, method, path, body) {
+  return fetch('https://api.github.com' + path, {
+    method,
+    headers: {
+      Authorization: 'Bearer ' + env.GH_TOKEN,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'kemkite-bot',
+      'content-type': 'application/json',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+/**
+ * libsodium crypto_box_seal against the repo's base64 X25519 public key.
+ * Verified byte-for-byte against PyNaCl's SealedBox before shipping.
+ *   ephemeral X25519 keypair
+ *   key   = HSalsa20(scalarmult(ephSec, recipientPub), zero)   [crypto_box beforenm]
+ *   nonce = blake2b(ephPub || recipientPub, 24)
+ *   body  = XSalsa20-Poly1305(key, nonce, message)
+ *   output = base64(ephPub || body)
+ */
+// tweetnacl core_hsalsa20 (public domain), trimmed to the 32-byte subkey output.
+function core_hsalsa20(out, inp, k, c) {
+  let x0=c[0]|c[1]<<8|c[2]<<16|c[3]<<24,
+      x5=c[4]|c[5]<<8|c[6]<<16|c[7]<<24,
+      x10=c[8]|c[9]<<8|c[10]<<16|c[11]<<24,
+      x15=c[12]|c[13]<<8|c[14]<<16|c[15]<<24,
+      x1=k[0]|k[1]<<8|k[2]<<16|k[3]<<24,
+      x2=k[4]|k[5]<<8|k[6]<<16|k[7]<<24,
+      x3=k[8]|k[9]<<8|k[10]<<16|k[11]<<24,
+      x4=k[12]|k[13]<<8|k[14]<<16|k[15]<<24,
+      x6=inp[0]|inp[1]<<8|inp[2]<<16|inp[3]<<24,
+      x7=inp[4]|inp[5]<<8|inp[6]<<16|inp[7]<<24,
+      x8=inp[8]|inp[9]<<8|inp[10]<<16|inp[11]<<24,
+      x9=inp[12]|inp[13]<<8|inp[14]<<16|inp[15]<<24,
+      x11=k[16]|k[17]<<8|k[18]<<16|k[19]<<24,
+      x12=k[20]|k[21]<<8|k[22]<<16|k[23]<<24,
+      x13=k[24]|k[25]<<8|k[26]<<16|k[27]<<24,
+      x14=k[28]|k[29]<<8|k[30]<<16|k[31]<<24;
+  let u;
+  for (let i=0;i<20;i+=2){
+    u=x0+x12|0; x4^=u<<7|u>>>25; u=x4+x0|0; x8^=u<<9|u>>>23;
+    u=x8+x4|0; x12^=u<<13|u>>>19; u=x12+x8|0; x0^=u<<18|u>>>14;
+    u=x5+x1|0; x9^=u<<7|u>>>25; u=x9+x5|0; x13^=u<<9|u>>>23;
+    u=x13+x9|0; x1^=u<<13|u>>>19; u=x1+x13|0; x5^=u<<18|u>>>14;
+    u=x10+x6|0; x14^=u<<7|u>>>25; u=x14+x10|0; x2^=u<<9|u>>>23;
+    u=x2+x14|0; x6^=u<<13|u>>>19; u=x6+x2|0; x10^=u<<18|u>>>14;
+    u=x15+x11|0; x3^=u<<7|u>>>25; u=x3+x15|0; x7^=u<<9|u>>>23;
+    u=x7+x3|0; x11^=u<<13|u>>>19; u=x11+x7|0; x15^=u<<18|u>>>14;
+    u=x0+x3|0; x1^=u<<7|u>>>25; u=x1+x0|0; x2^=u<<9|u>>>23;
+    u=x2+x1|0; x3^=u<<13|u>>>19; u=x3+x2|0; x0^=u<<18|u>>>14;
+    u=x5+x4|0; x6^=u<<7|u>>>25; u=x6+x5|0; x7^=u<<9|u>>>23;
+    u=x7+x6|0; x4^=u<<13|u>>>19; u=x4+x7|0; x5^=u<<18|u>>>14;
+    u=x10+x9|0; x11^=u<<7|u>>>25; u=x11+x10|0; x8^=u<<9|u>>>23;
+    u=x8+x11|0; x9^=u<<13|u>>>19; u=x9+x8|0; x10^=u<<18|u>>>14;
+    u=x15+x14|0; x12^=u<<7|u>>>25; u=x12+x15|0; x13^=u<<9|u>>>23;
+    u=x13+x12|0; x14^=u<<13|u>>>19; u=x14+x13|0; x15^=u<<18|u>>>14;
+  }
+  const o=[x0,x5,x10,x15,x6,x7,x8,x9];
+  for(let i=0;i<8;i++){ out[4*i]=o[i]&0xff; out[4*i+1]=o[i]>>>8&0xff; out[4*i+2]=o[i]>>>16&0xff; out[4*i+3]=o[i]>>>24&0xff; }
+}
+function boxKey(shared){
+  const sigma=new TextEncoder().encode('expand 32-byte k');
+  const out=new Uint8Array(32);
+  core_hsalsa20(out, new Uint8Array(16), shared, sigma);
+  return out;
+}
+
+async function sealedBox(message, recipientPubB64) {
+  const { x25519 } = await import('@noble/curves/ed25519.js');
+  const { xsalsa20poly1305 } = await import('@noble/ciphers/salsa.js');
+  const { blake2b } = await import('@noble/hashes/blake2.js');
+  const pub = Uint8Array.from(atob(recipientPubB64), (c) => c.charCodeAt(0));
+  const ephSec = x25519.utils.randomSecretKey();
+  const ephPub = x25519.getPublicKey(ephSec);
+  const shared = x25519.getSharedSecret(ephSec, pub);
+  const key = boxKey(shared);
+  const nonce = blake2b(new Uint8Array([...ephPub, ...pub]), { dkLen: 24 });
+  const body = xsalsa20poly1305(key, nonce).encrypt(new TextEncoder().encode(message));
+  const out = new Uint8Array(ephPub.length + body.length);
+  out.set(ephPub);
+  out.set(body, ephPub.length);
+  return btoa(String.fromCharCode(...out));
+}
+
+export function __boxKeyHex(sharedHex) {
+  const shared = Uint8Array.from(sharedHex.match(/../g).map((h) => parseInt(h, 16)));
+  return [...boxKey(shared)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function ghConfigured(env) {
+  return Boolean(env.GH_TOKEN && env.GH_REPO && env.GH_WORKFLOW);
+}
+
+/**
+ * Appends name:uuid to the USERS secret and triggers the fleet deploy.
+ * Returns true if the workflow dispatch was accepted.
+ */
+async function addUser(env, name, uuid) {
+  // Current names come from what this worker already knows; each carries its
+  // own uuid, so rebuild the full USERS string from the live set plus the new
+  // one. env.UUID stays the "main" user and is not part of USERS.
+  const existing = parseUsers(env).filter((u) => u.name !== 'main');
+  const line = existing.map((u) => u.name + ':' + u.uuid).concat(name + ':' + uuid).join(',');
+
+  // Encrypt USERS against the repo public key (libsodium sealed box).
+  const keyRes = await gh(env, 'GET', '/repos/' + env.GH_REPO + '/actions/secrets/public-key');
+  if (!keyRes.ok) return false;
+  const { key, key_id } = await keyRes.json();
+  const sealed = await sealedBox(line, key);
+  const put = await gh(env, 'PUT', '/repos/' + env.GH_REPO + '/actions/secrets/WORKER_USERS', {
+    encrypted_value: sealed,
+    key_id,
+  });
+  if (!put.ok) return false;
+
+  const disp = await gh(env, 'POST',
+    '/repos/' + env.GH_REPO + '/actions/workflows/' + env.GH_WORKFLOW + '/dispatches',
+    { ref: env.GH_REF || 'main', inputs: { mode: 'fleet' } });
+  return disp.ok;
+}
+
 async function call(env, method, body) {
   return fetch(TG + env.TG_TOKEN + '/' + method, {
     method: 'POST',
@@ -187,6 +319,7 @@ async function sendDocument(env, chatId, filename, text, caption) {
 const HELP = [
   'kemkite is up.',
   '',
+  '/adduser <name>  make a new user and redeploy, then hand back their links',
   '/config  one file per host (ws, and grpc when it is on)',
   '',
   'Add a name to any of those to pick a user, e.g. /sub ali',
@@ -227,8 +360,47 @@ export async function handleUpdate(request, env) {
   const arg = msg.text.trim().split(/\s+/)[1];
   const who = findUser(users, arg) || users[0];
 
+  // A bare name typed right after /adduser (or after being asked) is treated
+  // as the new user's name.
+  const pending = cmd === '/adduser';
+  const nameArg = pending ? arg : (env._awaitName ? cmd.replace(/^\//, '') : null);
+
   try {
-    if (cmd === '/users') {
+    if (cmd === '/adduser' || cmd === '/newuser') {
+      if (!ghConfigured(env)) {
+        await call(env, 'sendMessage', { chat_id: chatId, text: 'adding users needs GH_TOKEN, GH_REPO and GH_WORKFLOW set on the worker.' });
+        return new Response('ok');
+      }
+      if (!arg) {
+        await call(env, 'sendMessage', { chat_id: chatId, text: 'send: /adduser <name>   e.g. /adduser ali' });
+        return new Response('ok');
+      }
+      const clean = arg.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24);
+      if (!clean) {
+        await call(env, 'sendMessage', { chat_id: chatId, text: 'that name has no usable characters, try letters or numbers' });
+        return new Response('ok');
+      }
+      if (users.some((u) => u.name.toLowerCase() === clean.toLowerCase())) {
+        await call(env, 'sendMessage', { chat_id: chatId, text: 'there is already a user called ' + clean });
+        return new Response('ok');
+      }
+      const uuid = crypto.randomUUID();
+      await call(env, 'sendMessage', { chat_id: chatId, text: 'adding ' + clean + ' and redeploying, this takes a minute...' });
+      const ok = await addUser(env, clean, uuid);
+      if (ok) {
+        const subs = subLinkHosts(env, hosts)
+          .map((h) => 'https://' + h + '/' + env.SUB_PATH + '?u=' + uuid)
+          .join('\n\n');
+        await call(env, 'sendMessage', {
+          chat_id: chatId,
+          text: clean + ' is being added. In about a minute their links work:\n\n' + subs +
+            '\n\nuuid: ' + uuid + '\n\nGive them at least two of the links.',
+          disable_web_page_preview: true,
+        });
+      } else {
+        await call(env, 'sendMessage', { chat_id: chatId, text: "couldn't kick off the deploy, check the worker's GH settings" });
+      }
+    } else if (cmd === '/users') {
       await call(env, 'sendMessage', {
         chat_id: chatId,
         text: users.map((u, i) => (i + 1) + '. ' + u.name + '\n   ' + u.uuid).join('\n'),
